@@ -2,12 +2,12 @@
  * GEO-SEO MCP Server
  * AI Search Optimization Audits — callable from Claude chat
  *
- * Architecture mirrors renny-tee-sniper: Express + SSE MCP transport
+ * Architecture mirrors renny-tee-sniper: Express + StreamableHTTP MCP transport
  * Deploy to Railway, connect as MCP in Claude.ai
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { z } from "zod";
 import {
@@ -21,47 +21,53 @@ import {
   fullAudit,
 } from "./analyzer.js";
 
-// ─── Tool Registration Helper ───────────────────────────────────
+// ─── Tool Registration ──────────────────────────────────────────
 
-function registerTools(server) {
+function createMcpServer() {
+  const server = new McpServer({
+    name: "geo-seo",
+    version: "1.0.0",
+    description: "GEO-SEO Audit Tools — Optimize websites for AI-powered search engines",
+  });
+
   server.tool(
     "geo_audit",
-    "Run a full GEO + SEO audit on a URL. Returns composite GEO Score (0-100), category breakdowns (citability, brand authority, content quality, technical, structured data, platform optimization), top priorities, and detailed findings.",
+    "Run a full GEO + SEO audit on a URL. Returns composite GEO Score (0-100), category breakdowns, top priorities, and detailed findings.",
     { url: z.string().url().describe("The URL to audit (e.g. https://example.com)") },
     async ({ url }) => {
       try {
         const result = await fullAudit(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
 
   server.tool(
     "geo_citability",
-    "Score a page's content blocks for AI citation readiness. Analyzes each content section for answer block quality, self-containment, structural readability, statistical density, and uniqueness signals. Returns per-block scores (0-100) with grades A-F.",
+    "Score a page's content blocks for AI citation readiness. Returns per-block scores (0-100) with grades A-F, plus top/bottom 5 blocks.",
     { url: z.string().url().describe("The page URL to analyze for citability") },
     async ({ url }) => {
       try {
         const result = await analyzeCitability(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
 
   server.tool(
     "geo_crawlers",
-    "Check a site's robots.txt for AI crawler access. Analyzes directives for 14 AI crawlers including GPTBot, ClaudeBot, PerplexityBot, Google-Extended, and others. Returns ALLOWED/BLOCKED/PARTIALLY_BLOCKED status for each.",
+    "Check a site's robots.txt for AI crawler access. Analyzes directives for 14 AI crawlers. Returns ALLOWED/BLOCKED/PARTIALLY_BLOCKED status for each.",
     { url: z.string().url().describe("The site URL to check crawler access for") },
     async ({ url }) => {
       try {
         const result = await fetchCrawlers(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
@@ -75,14 +81,14 @@ function registerTools(server) {
         const result = await analyzeLlmsTxt(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
 
   server.tool(
     "geo_brands",
-    "Scan brand mentions and entity presence across AI-cited platforms. Checks Wikipedia, Wikidata, and provides search URLs for YouTube, Reddit, LinkedIn, G2, Trustpilot, and more.",
+    "Scan brand mentions and entity presence across AI-cited platforms. Checks Wikipedia, Wikidata, and provides search URLs for YouTube, Reddit, LinkedIn, G2, Trustpilot.",
     {
       url: z.string().url().describe("The site URL to scan brand presence for"),
       brand_name: z.string().optional().describe("Override brand name (auto-detected from homepage if omitted)"),
@@ -92,35 +98,35 @@ function registerTools(server) {
         const result = await scanBrands(url, brand_name || null);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
 
   server.tool(
     "geo_schema",
-    "Analyze structured data (JSON-LD, microdata, RDFa) on a page. Detects schema types, checks for sameAs links (critical for AI entity recognition), and recommends missing schemas.",
+    "Analyze structured data (JSON-LD, microdata, RDFa) on a page. Detects schema types, checks for sameAs links, and recommends missing schemas.",
     { url: z.string().url().describe("The page URL to analyze schema markup for") },
     async ({ url }) => {
       try {
         const result = await analyzeSchema(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
 
   server.tool(
     "geo_technical",
-    "Quick technical SEO audit. Checks title, meta description, H1 tags, canonical, image alt text, SSR rendering, security headers, structured data presence, and content depth.",
+    "Quick technical SEO audit. Checks title, meta description, H1 tags, canonical, image alt text, SSR rendering, security headers, structured data, and content depth.",
     { url: z.string().url().describe("The page URL to run technical checks on") },
     async ({ url }) => {
       try {
         const result = await technicalCheck(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
@@ -134,50 +140,57 @@ function registerTools(server) {
         const result = await fetchPage(url);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: e.message }) }], isError: true };
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   );
+
+  return server;
 }
 
-// ─── Express + SSE Transport ────────────────────────────────────
+// ─── Express + StreamableHTTP Transport ─────────────────────────
 
 const app = express();
+app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// Track active transports for cleanup
-const transports = {};
-
-app.get("/sse", async (req, res) => {
-  console.log("New SSE connection");
-  
-  // Create a fresh MCP server per connection
-  const mcpServer = new McpServer({
-    name: "geo-seo",
-    version: "1.0.0",
-    description: "GEO-SEO Audit Tools — Optimize websites for AI-powered search engines",
-  });
-  registerTools(mcpServer);
-
-  const transport = new SSEServerTransport("/messages", res);
-  transports[transport.sessionId] = { transport, server: mcpServer };
-
-  res.on("close", () => {
-    console.log(`SSE connection closed: ${transport.sessionId}`);
-    delete transports[transport.sessionId];
-  });
-
-  await mcpServer.connect(transport);
+// MCP endpoint — stateless, one server per request (same as renny-tee-sniper)
+app.post("/mcp", async (req, res) => {
+  try {
+    const server = createMcpServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error("[MCP] Error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      });
+    }
+  }
 });
 
-app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const session = transports[sessionId];
-  if (!session) {
-    console.error(`Unknown session: ${sessionId}`);
-    return res.status(400).json({ error: "Unknown session" });
-  }
-  await session.transport.handlePostMessage(req, res);
+app.get("/mcp", async (_req, res) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Method not allowed. Use POST." },
+    id: null,
+  }));
+});
+
+app.delete("/mcp", async (_req, res) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: { code: -32000, message: "Session management not supported." },
+    id: null,
+  }));
 });
 
 // Health check
@@ -186,7 +199,7 @@ app.get("/", (req, res) => {
     name: "GEO-SEO MCP Server",
     version: "1.0.0",
     status: "running",
-    active_sessions: Object.keys(transports).length,
+    mcp_endpoint: "/mcp",
     tools: [
       "geo_audit",
       "geo_citability",
@@ -197,11 +210,10 @@ app.get("/", (req, res) => {
       "geo_technical",
       "geo_fetch_page",
     ],
-    description: "AI Search Optimization Audits — connect as MCP in Claude.ai",
   });
 });
 
 app.listen(PORT, () => {
   console.log(`GEO-SEO MCP Server running on port ${PORT}`);
-  console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
+  console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
 });
